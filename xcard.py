@@ -31,7 +31,10 @@ import jinja2
 
 from astrbot.api import logger
 
-import render
+try:                                    # 作为包的一部分加载（AstrBot 正常路径）
+    from . import render
+except ImportError:                     # 测试里直接 import xcard
+    import render
 
 BEIJING = timezone(timedelta(hours=8))  # 中国没有夏令时，固定东八区，不看本机时区
 TEMPLATE = Path(__file__).parent / "templates" / "x_card.html"

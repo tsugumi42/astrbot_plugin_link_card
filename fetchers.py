@@ -652,6 +652,16 @@ async def fetch_og(client, platform, url):
 # X / Twitter：fxtwitter 公共接口
 # ---------------------------------------------------------------------------
 
+def _x_videos(media):
+    """视频和 GIF：直链（发文件用）、缩略图、宽高、时长（秒）。"""
+    out = []
+    for v in (media or {}).get("all") or []:
+        if v.get("type") in ("video", "gif") and (v.get("url") or v.get("thumbnail_url")):
+            out.append({"url": v.get("url"), "thumbnail": v.get("thumbnail_url"), "width": v.get("width"),
+                        "height": v.get("height"), "duration": v.get("duration"), "type": v.get("type")})
+    return out
+
+
 def _x_large(url):
     """推特图片取大图（长边 2048）；orig 动辄几 MB，群里看不出差别。"""
     base = re.sub(r"[?].*$", "", url)
@@ -679,26 +689,36 @@ async def _x_card(client, url, tid):
             images.append(v["thumbnail_url"])
         is_video = True
         dur = dur or duration(v.get("duration"))
-        videos.append({"url": v.get("url"), "thumb": v.get("thumbnail_url"),
-                       "duration": duration(v.get("duration")), "gif": v.get("type") == "gif"})
+    videos = _x_videos(media)
     q = t.get("quote")
     quote_block = None
     if q:
         qa = q.get("author") or {}
-        quote_block = {"author": f"{qa.get('name', '')} @{qa.get('screen_name', '')}", "text": q.get("text") or ""}
+        q_photos = [p for p in ((q.get("media") or {}).get("all") or []) if p.get("type") == "photo"]
+        quote_block = {
+            "author": f"{qa.get('name', '')} @{qa.get('screen_name', '')}", "text": q.get("text") or "",
+            # 推特卡片的引用框要用的：头像、认证、日期、图片和视频缩略图
+            "name": qa.get("name"), "handle": qa.get("screen_name"), "avatar": qa.get("avatar_url"),
+            "verification": qa.get("verification"), "timestamp": q.get("created_timestamp"),
+            "images": [{"url": p.get("url"), "width": p.get("width"), "height": p.get("height")} for p in q_photos],
+            "videos": _x_videos(q.get("media")),
+        }
     return card(
         "x", url,
         text=t.get("text") or "",
         # bio 不显示在卡片上，只用来按账号屏蔽（简介里带敏感词的账号整条不发）
         author={"name": a.get("name"), "handle": "@" + (a.get("screen_name") or ""), "avatar": a.get("avatar_url"),
-                "bio": " ".join(x for x in (a.get("description"), a.get("location")) if x)},
+                "bio": " ".join(x for x in (a.get("description"), a.get("location")) if x),
+                "verification": a.get("verification")},
         images=images[:4], video=is_video and not media.get("photos"), duration=dur,
         stats=[stat("回复", t.get("replies")), stat("转帖", t.get("retweets")),
                stat("喜欢", t.get("likes")), stat("浏览", t.get("views"))],
         time=fmt_time(t.get("created_timestamp")), quote=quote_block,
         sensitive=bool(t.get("possibly_sensitive")),
         # 原图（发消息时另附，不画进卡片）和视频直链
-        photos=photos, videos=videos,
+        photos=photos, videos=videos, poll=t.get("poll"),
+        timestamp=t.get("created_timestamp"),
+        x_stats={k: t.get(k) for k in ("replies", "retweets", "likes", "bookmarks", "views")},
     )
 
 

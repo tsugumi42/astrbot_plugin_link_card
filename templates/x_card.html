@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<!--
+  推特卡片（xcard.py 填数据）。版式照 Sumika 推特卡片（规格-链接发送改版 附录 C，react-tweet 的数值）和 X 网页单条推文。
+  互动行图标：MingCute Icon（https://github.com/Richard9394/MingCute，Apache-2.0）的 chat_3、repeat、heart、bookmark 线性版。
+  认证章是自己画的八瓣圆章，不用 X 的图标资源。用户文字一律 |e：文转图远端套模板时不一定开了自动转义。
+-->
+<style>
+{{ font_css|safe }}
+body.light {
+  --bg: #ffffff; --border: rgb(207,217,222); --text: rgb(15,20,25); --sub: rgb(83,100,113);
+  --ph: rgb(247,249,249); --blue: rgb(29,155,240);
+}
+body.dark {
+  --bg: rgb(21,32,43); --border: rgb(66,83,100); --text: rgb(247,249,249); --sub: rgb(139,152,165);
+  --ph: rgb(30,39,50); --blue: rgb(29,155,240);
+}
+html, body { margin: 0; background: var(--bg); }
+body {
+  padding: 8px; color: var(--text);
+  font-family: "LinkCardRounded", "LinkCardMono", "Segoe UI", "Microsoft YaHei", "PingFang SC",
+    "Noto Sans CJK SC", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  font-feature-settings: "chws" 1;
+  -webkit-text-size-adjust: none; text-size-adjust: none;
+}
+.card {
+  box-sizing: border-box; width: {{ width|int }}px; margin: 0 auto; padding: 12px 16px;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--bg);
+}
+.emo { font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "LinkCardRounded", sans-serif; }
+.ln { color: var(--blue); }
+.pw { font-feature-settings: "chws" 1, "pwid" 1; }
+.badge { flex: none; display: block; }
+.badge.blue { color: rgb(29,155,240); }
+.badge.gold { color: rgb(226,176,22); }
+.badge.gray { color: rgb(130,154,171); }
+
+.head { display: flex; align-items: center; padding-bottom: 12px; }
+.avatar { flex: none; width: 48px; height: 48px; border-radius: 50%; object-fit: cover; background: var(--ph); display: block; }
+.who { min-width: 0; margin-left: 8px; display: flex; flex-direction: column; justify-content: center; }
+.name-row { display: flex; align-items: center; min-width: 0; }
+.name { font-size: 15px; line-height: 22px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.name-row .badge { width: 18.75px; height: 18.75px; margin-left: 2px; }
+.handle { font-size: 15px; line-height: 22px; color: var(--sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.body { font-size: 20px; line-height: 29px; }
+.p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.p + .p { margin-top: 12px; }
+.full { margin-top: 4px; font-size: 15px; line-height: 22px; color: var(--sub); }
+
+.grid { display: grid; gap: 2px; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; background: var(--border); overflow: hidden; }
+.grid.n1 { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+.grid.n2 { grid-template-rows: 1fr; }
+.grid.n3 .cell:first-child { grid-row: span 2; }
+.head + .media, .head + .poll, .head + .quote { margin-top: 0; }
+.media { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; }
+.cell { position: relative; min-width: 0; min-height: 0; background: var(--ph); overflow: hidden; }
+.cell img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.cell .miss { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 14px; color: var(--sub); }
+.play { position: absolute; left: 50%; top: 50%; width: 52px; height: 52px; margin: -26px 0 0 -26px; border-radius: 50%;
+  background: rgb(29,155,240); box-shadow: 0 0 0 3px rgba(255,255,255,.9); display: flex; align-items: center; justify-content: center; }
+.play svg { width: 26px; height: 26px; margin-left: 3px; }
+.pill { position: absolute; left: 10px; bottom: 10px; padding: 0 5px; border-radius: 4px; background: rgba(0,0,0,.77);
+  color: #fff; font-size: 13px; line-height: 20px; font-weight: 700; }
+.plus { position: absolute; inset: 0; background: rgba(0,0,0,.45); color: #fff; display: flex; align-items: center;
+  justify-content: center; font-size: 26px; font-weight: 700; }
+
+.poll { margin-top: 12px; }
+.pc { position: relative; height: 36px; border-radius: 6px; background: var(--ph); overflow: hidden;
+  display: flex; align-items: center; padding: 0 12px; font-size: 15px; line-height: 20px; }
+.pc + .pc { margin-top: 8px; }
+.pc .bar { position: absolute; left: 0; top: 0; bottom: 0; background: var(--border); }
+.pc.lead { font-weight: 700; }
+.pc.lead .bar { background: rgba(29,155,240,.35); }
+.pc .pl { position: relative; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pc .pp { position: relative; flex: none; margin-left: 12px; }
+.pf { margin-top: 8px; font-size: 15px; line-height: 20px; color: var(--sub); }
+
+.quote { margin-top: 12px; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.q-in { padding: 12px; }
+.q-head { display: flex; align-items: center; font-size: 15px; line-height: 22px; min-width: 0; }
+.q-av { flex: none; width: 20px; height: 20px; border-radius: 50%; object-fit: cover; background: var(--ph); margin-right: 6px; display: block; }
+.q-name { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; max-width: 60%; }
+.q-head .badge { width: 18.75px; height: 18.75px; margin-left: 2px; }
+.q-sub { color: var(--sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-left: 4px; flex: 0 1 auto; min-width: 0; }
+.q-body { margin-top: 4px; font-size: 15px; line-height: 22px; }
+.q-body .p + .p { margin-top: 8px; }
+.quote .grid { border-radius: 0; }
+
+.info { margin-top: 12px; font-size: 15px; line-height: 22px; color: var(--sub); white-space: nowrap; overflow: hidden; }
+.info b { color: var(--text); font-weight: 700; }
+.actions { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 4px; display: flex; justify-content: space-between; }
+.actions.one { justify-content: flex-start; }
+.act { display: flex; align-items: center; color: var(--sub); font-size: 14px; line-height: 16px; font-weight: 700; }
+.act:first-child { margin-left: -4px; }
+.act .ic { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; }
+.act svg { width: 17.5px; height: 17.5px; display: block; }
+.act span { margin-left: 4px; }
+</style>
+</head>
+{%- macro text_blocks(ps) -%}
+{%- for p in ps -%}<div class="p">{% for s in p %}{% if s.k == 'link' %}<span class="ln{% if s.pw %} pw{% endif %}">{{ s.t|e }}</span>{% elif s.k == 'pw' %}<span class="pw">{{ s.t|e }}</span>{% elif s.k == 'emo' %}<span class="emo">{{ s.t|e }}</span>{% else %}{{ s.t|e }}{% endif %}{% endfor %}</div>{%- endfor -%}
+{%- endmacro -%}
+{%- macro badge(kind) -%}
+{%- if kind in ('blue', 'gold', 'gray') -%}
+<svg class="badge {{ kind }}" viewBox="0 0 24 24" aria-label="认证"><path fill="currentColor" d="M24.00 12.00 L23.81 12.77 L23.30 13.49 L22.59 14.11 L21.85 14.64 L21.24 15.14 L20.87 15.67 L20.75 16.32 L20.83 17.10 L20.98 18.00 L21.04 18.94 L20.90 19.81 L20.49 20.49 L19.81 20.90 L18.94 21.04 L18.00 20.98 L17.10 20.83 L16.32 20.75 L15.67 20.87 L15.14 21.24 L14.64 21.85 L14.11 22.59 L13.49 23.30 L12.77 23.81 L12.00 24.00 L11.23 23.81 L10.51 23.30 L9.89 22.59 L9.36 21.85 L8.86 21.24 L8.33 20.87 L7.68 20.75 L6.90 20.83 L6.00 20.98 L5.06 21.04 L4.19 20.90 L3.51 20.49 L3.10 19.81 L2.96 18.94 L3.02 18.00 L3.17 17.10 L3.25 16.32 L3.13 15.67 L2.76 15.14 L2.15 14.64 L1.41 14.11 L0.70 13.49 L0.19 12.77 L0.00 12.00 L0.19 11.23 L0.70 10.51 L1.41 9.89 L2.15 9.36 L2.76 8.86 L3.13 8.33 L3.25 7.68 L3.17 6.90 L3.02 6.00 L2.96 5.06 L3.10 4.19 L3.51 3.51 L4.19 3.10 L5.06 2.96 L6.00 3.02 L6.90 3.17 L7.68 3.25 L8.33 3.13 L8.86 2.76 L9.36 2.15 L9.89 1.41 L10.51 0.70 L11.23 0.19 L12.00 0.00 L12.77 0.19 L13.49 0.70 L14.11 1.41 L14.64 2.15 L15.14 2.76 L15.67 3.13 L16.32 3.25 L17.10 3.17 L18.00 3.02 L18.94 2.96 L19.81 3.10 L20.49 3.51 L20.90 4.19 L21.04 5.06 L20.98 6.00 L20.83 6.90 L20.75 7.68 L20.87 8.33 L21.24 8.86 L21.85 9.36 L22.59 9.89 L23.30 10.51 L23.81 11.23Z"/><path fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="M7.44 12.24 L10.80 15.60 L16.80 8.64"/></svg>
+{%- endif -%}
+{%- endmacro -%}
+{%- macro grid(m) -%}
+<div class="grid n{{ m.n if m.n < 4 else 4 }}" style="aspect-ratio: {{ m.aspect|e }}">
+{%- for c in m.cells -%}
+<div class="cell">
+{%- if c.src %}<img src="{{ c.src|e }}" alt="">{% else %}<div class="miss">图片未加载</div>{% endif -%}
+{%- if c.video and c.src %}<div class="play"><svg viewBox="0 0 24 24"><path fill="#fff" d="M7 4.5v15l12.5-7.5z"/></svg></div>{% endif -%}
+{%- if c.gif %}<div class="pill">GIF</div>{% elif c.duration %}<div class="pill">{{ c.duration|e }}</div>{% endif -%}
+{%- if loop.last and m.more %}<div class="plus">+{{ m.more|int }}</div>{% endif -%}
+</div>
+{%- endfor -%}
+</div>
+{%- endmacro -%}
+<body class="{{ 'light' if theme == 'light' else 'dark' }}">
+<div class="card">
+  <div class="head">
+    {% if author.avatar %}<img class="avatar" src="{{ author.avatar|e }}" alt="">{% else %}<div class="avatar"></div>{% endif %}
+    <div class="who">
+      {% if author.name %}<div class="name-row"><span class="name">{{ author.name|e }}</span>{{ badge(author.badge) }}</div>{% endif %}
+      {% if author.handle %}<div class="handle">{{ author.handle|e }}</div>{% endif %}
+    </div>
+  </div>
+  {% if paras %}<div class="body">{{ text_blocks(paras) }}</div>{% endif %}
+  {% if truncated %}<div class="full">完整内容见原文</div>{% endif %}
+  {% if media %}<div class="media">{{ grid(media) }}</div>{% endif %}
+  {% if poll %}
+  <div class="poll">
+    {% for c in poll.choices %}<div class="pc{% if c.lead %} lead{% endif %}"><div class="bar" style="width: {{ c.fill|float }}%"></div><span class="pl">{{ c.label|e }}</span>{% if c.pct %}<span class="pp">{{ c.pct|e }}</span>{% endif %}</div>{% endfor %}
+    {% if poll.footer_parts %}<div class="pf">{% for t in poll.footer_parts %}{% if not loop.first %}<span class="pw"> · </span>{% endif %}{{ t|e }}{% endfor %}</div>{% endif %}
+  </div>
+  {% endif %}
+  {% if quote %}
+  <div class="quote">
+    <div class="q-in">
+      <div class="q-head">
+        {% if quote.avatar %}<img class="q-av" src="{{ quote.avatar|e }}" alt="">{% else %}<div class="q-av"></div>{% endif %}
+        {% if quote.name %}<span class="q-name">{{ quote.name|e }}</span>{% endif %}{{ badge(quote.badge) }}
+        {% if quote.handle or quote.date %}<span class="q-sub">{{ quote.handle|e }}{% if quote.handle and quote.date %}<span class="pw"> · </span>{% endif %}{{ quote.date|e }}</span>{% endif %}
+      </div>
+      {% if quote.paras %}<div class="q-body">{{ text_blocks(quote.paras) }}</div>{% endif %}
+    </div>
+    {% if quote.media %}{{ grid(quote.media) }}{% endif %}
+  </div>
+  {% endif %}
+  {% if time_parts or views %}
+  <div class="info">{% for t in time_parts %}{% if not loop.first %}<span class="pw"> · </span>{% endif %}{{ t|e }}{% endfor %}{% if time_parts and views %}<span class="pw"> · </span>{% endif %}{% if views %}<b>{{ views|e }}</b> 查看{% endif %}</div>
+  {% endif %}
+  {% if actions %}
+  <div class="actions{% if actions|length == 1 %} one{% endif %}">
+    {% for a in actions %}<div class="act"><div class="ic">
+      {%- if a.icon == 'reply' -%}
+      <svg viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M12 5c-4.597 0-8 3.073-8 6.5 0 2.014 1.141 3.872 3.042 5.096.738.476.939 1.403.972 2.222.753-.31 1.258-1.16 2.172-.986.582.11 1.189.168 1.814.168 4.597 0 8-3.073 8-6.5S16.597 5 12 5M2 11.5C2 6.643 6.656 3 12 3s10 3.643 10 8.5S17.344 20 12 20c-.653 0-1.292-.053-1.911-.155-.093.073-.253.205-.45.344C9.07 20.59 8.249 21 7 21a1 1 0 0 1-1-1c0-.55.143-1.234-.094-1.756C3.577 16.723 2 14.298 2 11.5"/></svg>
+      {%- elif a.icon == 'repost' -%}
+      <svg viewBox="0 0 24 24"><path fill="currentColor" d="M20 9a1 1 0 0 1 .993.883L21 10v5a4 4 0 0 1-3.8 3.995L17 19H8.107l-.02.415-.034.519c-.027.346-.352.557-.631.41l-.306-.164-.36-.203-.198-.117-.43-.263a20.62 20.62 0 0 1-.229-.147l-.463-.31-.21-.147-.377-.273-.315-.24a16.254 16.254 0 0 1-.133-.104c-.236-.188-.225-.566.023-.762l.28-.217.34-.252.4-.282.456-.305.462-.291.416-.249.365-.205.307-.165c.275-.143.571.036.598.36l.025.347.024.415.01.23H17a2 2 0 0 0 1.995-1.85L19 15v-5a1 1 0 0 1 1-1m-3.422-5.345.306.165.36.203.198.117.43.263.229.147.463.31.21.147.377.273.315.24.133.104c.236.188.225.566-.023.762l-.28.217-.34.252-.4.282-.456.305-.462.291-.416.249-.365.205-.307.165c-.275.143-.572-.036-.598-.36l-.025-.347-.024-.415a24.926 24.926 0 0 1-.01-.23H7a2 2 0 0 0-2 2v5a1 1 0 1 1-2 0V9a4 4 0 0 1 4-4h8.893l.02-.415.022-.36.012-.159c.027-.346.352-.557.631-.41Z"/></svg>
+      {%- elif a.icon == 'like' -%}
+      <svg viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M18.494 3.801c2.095 1.221 3.569 3.7 3.504 6.592-.081 3.61-2.89 6.794-7.679 9.638-.71.422-1.458.969-2.319.969-.845 0-1.625-.557-2.32-.97-4.787-2.843-7.597-6.028-7.678-9.637-.065-2.892 1.409-5.37 3.504-6.592C7.466 2.66 9.928 2.653 12 4.338c2.072-1.685 4.534-1.679 6.494-.537M17.487 5.53c-1.394-.812-3.136-.783-4.644.743a1.188 1.188 0 0 1-1.686 0c-1.508-1.526-3.25-1.555-4.644-.743-1.444.842-2.56 2.628-2.511 4.82.056 2.511 2.04 5.194 6.7 7.962.408.243.834.554 1.298.683.464-.129.89-.44 1.298-.683 4.66-2.768 6.644-5.45 6.7-7.963.05-2.19-1.067-3.977-2.511-4.819"/></svg>
+      {%- else -%}
+      <svg viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M4 5a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3v16.028c0 1.22-1.38 1.93-2.372 1.221L12 18.229l-5.628 4.02c-.993.71-2.372 0-2.372-1.22zm3-1a1 1 0 0 0-1 1v15.057l5.128-3.663a1.5 1.5 0 0 1 1.744 0L18 20.057V5a1 1 0 0 0-1-1z"/></svg>
+      {%- endif -%}
+    </div>{% if a.t %}<span>{{ a.t|e }}</span>{% endif %}</div>{% endfor %}
+  </div>
+  {% endif %}
+</div>
+</body>
+</html>

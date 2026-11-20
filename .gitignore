@@ -8,3 +8,5 @@ __pycache__/
 *.pem
 *.zip
 .venv/
+fonts/WenYuan*.ttf
+fonts/MapleMono*.ttf

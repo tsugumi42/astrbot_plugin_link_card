@@ -358,6 +358,26 @@ class TestFonts(unittest.TestCase):
         self.assertIn('font-family: "测试字体", "Segoe UI"', html)
 
 
+class TestBottomHasContent(unittest.TestCase):
+    """通用页面截图：内容碰到窗口底边才按最大高度重截。"""
+
+    def _png(self, bottom_color):
+        from PIL import Image
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, True))
+        im = Image.new("RGB", (40, 40), (20, 30, 40))
+        im.paste(bottom_color, (0, 37, 40, 40))
+        path = Path(d) / "a.png"
+        im.save(path)
+        return path
+
+    def test_plain_bottom(self):
+        self.assertFalse(xcard._bottom_has_content(self._png((20, 30, 40))))
+
+    def test_content_at_bottom(self):
+        self.assertTrue(xcard._bottom_has_content(self._png((200, 200, 200))))
+
+
 class TestLocalRender(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

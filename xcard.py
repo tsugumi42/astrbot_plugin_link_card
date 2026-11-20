@@ -948,6 +948,67 @@ async def render_local(html, cache_dir, *, height=1600, scale=2, timeout=30.0, b
                 pass
 
 
+def _bottom_has_content(png, rows=4, threshold=10):
+    """截图最下面几行和左上角底色不一样，说明内容可能被窗口截断了。"""
+    from PIL import Image, ImageChops
+
+    with Image.open(png) as im:
+        im = im.convert("RGB")
+        w, h = im.size
+        bg = im.getpixel((2, 2))
+        strip = im.crop((0, max(0, h - rows), w, h))
+    diff = ImageChops.difference(strip, Image.new("RGB", strip.size, bg)).convert("L")
+    return diff.point(lambda v: 255 if v > threshold else 0).getbbox() is not None
+
+
+async def shoot_page(html, cache_dir, *, width, height=1600, scale=2, timeout=30.0, browser=None):
+    """通用卡片、长文页面的本机截图：窗口宽 width，先按 height 截，内容碰到底边就按最大高度再截一次。
+
+    不裁边（模板底色是纯色，调用方用 render.crop_image 按底色裁）。失败抛 XCardRenderError。
+    """
+    exe = browser or find_browser()
+    if not exe:
+        raise XCardRenderError("本机找不到 Edge 或 Chrome，没法本地出图")
+    cache = Path(cache_dir)
+    cache.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(_sweep, cache)
+    tag = uuid.uuid4().hex[:12]
+    html_path = cache / f"page-{tag}.html"
+    png = cache / f"page-{tag}.png"
+    profile = cache / f"page-prof-{tag}"
+    log_path = cache / f"page-{tag}.log"
+    html_path.write_text(html, encoding="utf-8")
+    deadline = asyncio.get_running_loop().time() + timeout
+    h = max(400, min(int(height), MAX_WINDOW_HEIGHT))
+    ok = False
+    try:
+        while True:
+            try:
+                await _shoot(_browser_args(exe, html_path, png, profile, width, h, scale), png, log_path, deadline)
+            except XCardRenderError as e:
+                if "超时" in str(e):
+                    await _kill_leftovers(profile)
+                    raise XCardRenderError(f"浏览器 {timeout:.0f} 秒内没出图") from None
+                raise
+            if h < MAX_WINDOW_HEIGHT and await asyncio.to_thread(_bottom_has_content, png):
+                h = MAX_WINDOW_HEIGHT
+                continue
+            ok = True
+            return png
+    finally:
+        await _remove_dir(profile)
+        for f in (html_path, log_path):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+        if not ok:
+            try:
+                png.unlink()
+            except OSError:
+                pass
+
+
 async def render_card(client, card, cache_dir, theme=None, fonts=None):
     """插件用的入口：整理数据、套模板、本机出图，返回 PNG 路径。失败抛异常，调用方退回通用卡片。"""
     data = await x_card_data(client, card, theme or theme_now(), fonts=fonts)

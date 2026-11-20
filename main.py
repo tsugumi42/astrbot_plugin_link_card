@@ -412,12 +412,36 @@ class LinkPreviewPlugin(Star):
             return None
         return await self._translate_text("\n\n".join(parts), umo)
 
-    async def _t2i(self, tmpl_path, data, out, attempts=3):
-        """用 AstrBot 的文转图服务出图，失败重试，再裁掉多余留白。
+    async def _local_image(self, html, width, out):
+        """本机 Edge / Chrome 截图出图（DPR 2，比远端清楚），按底色裁边，存成 out（JPEG）。失败返回 None。"""
+        try:
+            from . import xcard
+            from PIL import Image
+
+            png = await xcard.shoot_page(html, self.cache_dir / "page", width=width,
+                                         timeout=_int(self.config.get("render_timeout", 25), 25, 5, 120))
+        except Exception as e:  # noqa: BLE001 - 本机不行就交给远端文转图
+            logger.warning(f"[LinkPreview] 本机出图失败，改用文转图服务：{e}")
+            return None
+        try:
+            with Image.open(png) as im:
+                im.convert("RGB").save(out, "JPEG", quality=92)
+            render.crop_image(str(out))
+            return str(out)
+        finally:
+            png.unlink(missing_ok=True)
+
+    async def _t2i(self, tmpl_path, data, out, attempts=3, local=None):
+        """出图：local=(html, 宽) 时先本机截图，不行再用 AstrBot 的文转图服务，失败重试，再裁掉多余留白。
 
         远端服务偶尔 503，重试一两次基本能过；裁边是因为它的视口高度固定 720，
-        矮卡片下方会留一大片纯背景色。
+        矮卡片下方会留一大片纯背景色。2026-11-20 远端连着三次超时、群里只收到一句“预览失败”，
+        所以本机能出就不走远端。
         """
+        if local:
+            path = await self._local_image(local[0], local[1], out)
+            if path:
+                return path
         tmpl = tmpl_path.read_text(encoding="utf-8")
         timeout = _int(self.config.get("render_timeout", 25), 25, 5, 120)
         last = None
@@ -442,11 +466,13 @@ class LinkPreviewPlugin(Star):
 
     async def _render_html(self, tmpl_path, card, out):
         theme = "light" if self.config.get("theme") == "light" else "dark"
-        return await self._t2i(tmpl_path, render.card_data(card, theme), out)
+        local = (render.build_html(card, theme, t2i=False), 640) if tmpl_path == render.TEMPLATE else None
+        return await self._t2i(tmpl_path, render.card_data(card, theme), out, local=local)
 
     async def _render_page(self, article, blocks, no, total, hidden, theme, out):
         data = render.article_data(article, blocks, no, total, hidden, theme)
-        return await self._t2i(render.ARTICLE, data, out)
+        local = (render.build_article_html(article, blocks, no, total, hidden, theme), 680)
+        return await self._t2i(render.ARTICLE, data, out, local=local)
 
     async def _download_video(self, platform, url):
         """下载国内平台视频，返回本地 mp4 路径。"""

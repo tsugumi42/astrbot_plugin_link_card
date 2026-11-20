@@ -9,14 +9,13 @@ import time
 from pathlib import Path
 
 import httpx
-from urllib.parse import urlsplit
 
 import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, StarTools
 
-from . import cnvideo, fetchers, render, wordfilter
+from . import cnvideo, fetchers, layouts, render, wordfilter
 
 HELP = """外链预览
 群里发 YouTube / TikTok / Instagram / X / GitHub / Reddit / Bluesky / pixiv / Steam / 维基百科 / 维基文库 / Dailymotion / niconico / Spotify 等链接，会自动回一张预览卡片（带几条热门评论）。
@@ -30,7 +29,7 @@ HELP = """外链预览
 群里分享的 QQ 小程序卡片也能认：能拿到 qqdocurl 的按背后的真实网页出卡，纯小程序用卡片自带的标题和封面出卡。
 能拿到评论的平台：YouTube、TikTok、X（需配置浏览器服务，较慢）、GitHub Issue/PR、Bluesky、pixiv。Instagram、Reddit 拿不到评论。"""
 
-PLUGIN_NAME = "astrbot_plugin_link_preview"
+PLUGIN_NAME = "astrbot_plugin_link_card"
 # 本插件注册的指令和别名，用来把「指令消息」和「普通聊天」区分开
 COMMAND_NAMES = {
     "预览", "preview", "评论", "comments", "看评论",
@@ -93,6 +92,10 @@ def _brief(e, limit=200):
     """异常转成能直接发到群里的一句话。"""
     text = " ".join(str(e or "").split()) or e.__class__.__name__
     return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _image(path):
+    return Comp.Image.fromURL(path) if str(path).startswith("http") else Comp.Image.fromFileSystem(str(path))
 
 
 class LinkPreviewPlugin(Star):
@@ -366,7 +369,7 @@ class LinkPreviewPlugin(Star):
 
     def _clean_cache(self):
         cutoff = time.time() - 6 * 3600
-        for f in self.cache_dir.glob("*.jpg"):
+        for f in self.cache_dir.iterdir():
             try:
                 if f.stat().st_mtime < cutoff:
                     f.unlink()
@@ -380,10 +383,14 @@ class LinkPreviewPlugin(Star):
 
     async def _translate_text(self, text, umo=None, timeout=45):
         """调 AstrBot 当前使用的对话模型翻译。没配模型就抛错。"""
+        chosen = str(self.config.get("translate_provider") or "").strip()
         try:
-            provider = self.context.get_using_provider(umo)
+            provider = (self.context.get_provider_by_id(chosen) if chosen
+                        else self.context.get_using_provider(umo))
         except ValueError as e:      # 该会话配的不是对话模型（比如选成了 TTS）
             raise RuntimeError(f"当前会话的模型不能用来翻译：{e}") from e
+        if chosen and not provider:
+            raise RuntimeError(f"找不到配置里选的翻译模型：{chosen}")
         if not provider:
             raise RuntimeError("没有可用的对话模型，请先在 AstrBot 里配置 LLM 提供商")
         target = str(self.config.get("translate_target", "简体中文") or "简体中文").strip()
@@ -465,49 +472,150 @@ class LinkPreviewPlugin(Star):
         except OSError:
             pass
 
+    def _client(self):
+        timeout = _int(self.config.get("fetch_timeout", 12), 12, 3, 60)
+        return fetchers.make_client(self.config.get("proxy") or None, timeout)
+
+    async def _fetch_card(self, client, platform, url, comments_mode=False, session=None,
+                          translate=False, ark=None, n_comments=None):
+        """抓取 + 屏蔽 + 翻译，返回卡片字典。"""
+        if n_comments is None:
+            n_comments = 10 if comments_mode else _int(self.config.get("comment_count", 3), 3, 0, 10)
+        x_task = None
+        if platform == "x" and n_comments:
+            wait = 75 if comments_mode else _int(self.config.get("x_comments_wait", 25), 25, 0, 60)
+            x_task = asyncio.ensure_future(self._x_replies_for(url, n_comments, wait))
+        card = await fetchers.fetch(client, platform, url,
+                                    github_token=self.config.get("github_token") or None,
+                                    comments=n_comments,
+                                    steam_api_key=self.config.get("steam_api_key") or None,
+                                    x_service=self._x_service() if platform == "x" else None,
+                                    ark=ark)
+        if x_task:
+            card["comments"] = await x_task
+        card = self._filter_card(card)
+        auto = _bool(self.config.get("translate_auto", True), True)
+        if translate or (auto and fetchers.needs_translation(card.get("text") or card.get("title"))):
+            try:
+                card["translation"] = await self._translate_card(card, session)
+                logger.info("[LinkPreview] 已翻译卡片正文")
+            except Exception as e:  # noqa: BLE001 - 翻译失败不该影响出图
+                logger.warning(f"[LinkPreview] 翻译失败：{e}")
+                if translate:
+                    raise RuntimeError(f"翻译失败：{e}") from e
+        if comments_mode and not card.get("comments"):
+            card["no_comments_reason"] = (
+                "这个平台拿不到评论" if platform not in fetchers.COMMENT_PLATFORMS else "暂时没有评论"
+            )
+        return card
+
     async def _make_card_image(self, platform, url, comments_mode=False, session=None,
                                translate=False, ark=None):
         """抓取 + 渲染，返回图片路径；失败返回 None。"""
-        n_comments = 10 if comments_mode else _int(self.config.get("comment_count", 3), 3, 0, 10)
-        timeout = _int(self.config.get("fetch_timeout", 12), 12, 3, 60)
-        async with fetchers.make_client(self.config.get("proxy") or None, timeout) as client:
-            x_task = None
-            if platform == "x" and n_comments:
-                wait = 75 if comments_mode else _int(self.config.get("x_comments_wait", 25), 25, 0, 60)
-                x_task = asyncio.ensure_future(self._x_replies_for(url, n_comments, wait))
-            card = await fetchers.fetch(client, platform, url,
-                                        github_token=self.config.get("github_token") or None,
-                                        comments=n_comments,
-                                        steam_api_key=self.config.get("steam_api_key") or None,
-                                        x_service=self._x_service() if platform == "x" else None,
-                                        ark=ark)
-            if x_task:
-                card["comments"] = await x_task
-            card = self._filter_card(card)
-            auto = _bool(self.config.get("translate_auto", True), True)
-            if translate or (auto and fetchers.needs_translation(card.get("text") or card.get("title"))):
-                try:
-                    card["translation"] = await self._translate_card(card, session)
-                    logger.info("[LinkPreview] 已翻译卡片正文")
-                except Exception as e:  # noqa: BLE001 - 翻译失败不该影响出图
-                    logger.warning(f"[LinkPreview] 翻译失败：{e}")
-                    if translate:
-                        raise RuntimeError(f"翻译失败：{e}") from e
-            if comments_mode and not card.get("comments"):
-                card["no_comments_reason"] = (
-                    "这个平台拿不到评论" if platform not in fetchers.COMMENT_PLATFORMS else "暂时没有评论"
-                )
-            card = await render.prepare(
-                client, card,
-                text_length=_int(self.config.get("text_length", 420), 420, 60, 2000),
-                show_images=self._show_images(session),
-                comments_mode=comments_mode,
-            )
+        async with self._client() as client:
+            card = await self._fetch_card(client, platform, url, comments_mode, session, translate, ark)
+            return await self._card_image(client, card, comments_mode, session)
+
+    def _out_path(self, key, suffix):
+        name = hashlib.md5(f"{key}|{time.time()}".encode()).hexdigest()[:16]
+        return self.cache_dir / f"{name}{suffix}"
+
+    async def _card_image(self, client, card, comments_mode=False, session=None):
+        """把抓好的卡片画成图片（原插件的通用卡片）。"""
+        card = await render.prepare(
+            client, card,
+            text_length=_int(self.config.get("text_length", 420), 420, 60, 2000),
+            show_images=self._show_images(session),
+            comments_mode=comments_mode,
+        )
         if card.get("sensitive") and not _bool(self.config.get("blur_sensitive", True), True):
             card["blur"] = False
-        name = hashlib.md5(f"{url}|{comments_mode}|{time.time()}".encode()).hexdigest()[:16] + ".jpg"
-        out = self.cache_dir / name
+        out = self._out_path(f"{card['url']}|{comments_mode}", ".jpg")
         return await self._render_html(render.TEMPLATE, card, out)
+
+    # ------------------------------------------------------------------ 图文排版
+
+    def _use_layout(self, platform, comments_mode):
+        return (not comments_mode and platform in layouts.LAYOUT_PLATFORMS
+                and _bool(self.config.get("layout_enabled", True), True))
+
+    async def _x_card_image(self, client, card, session):
+        """X 卡片：本机浏览器出图（清晰、不经过别人的服务），不行再退回通用卡片。"""
+        try:
+            from . import xcard
+            return await xcard.render_card(client, card, self.cache_dir)
+        except Exception as e:  # noqa: BLE001 - 退回通用卡片
+            logger.warning(f"[LinkPreview] X 卡片本机出图失败，改用通用卡片：{e}")
+            return await self._card_image(client, dict(card, images=[]), False, session)
+
+    async def _save_media(self, client, url, referer, limit_mb):
+        """把图片或视频下到缓存目录，返回本地路径；下不来返回 None。"""
+        if not url:
+            return None
+        if not str(url).startswith("http"):
+            return str(url)
+        suffix = ".mp4" if re.search(r"\.mp4(\?|$)", str(url)) else ".img"
+        out = self._out_path(url, suffix)
+        try:
+            await cnvideo._stream_to_file(client, url, out, {"Referer": referer} if referer else {},
+                                          limit_mb * 1024 * 1024)
+        except Exception as e:  # noqa: BLE001 - 单个文件失败只少发这一个
+            logger.warning(f"[LinkPreview] 下载失败 {url}：{e}")
+            return None
+        if suffix == ".img":
+            fixed = out.with_suffix(render.image_suffix(out))
+            out.replace(fixed)
+            out = fixed
+        return str(out)
+
+    async def _layout_chains(self, event, platform, url, translate=False, ark=None):
+        """抓取后按平台排版，返回要依次发出的消息链列表。"""
+        session = event.unified_msg_origin
+        limit = _int(self.config.get("image_limit", 3), 3, 1, 9)
+        video_mb = _int(self.config.get("download_max_mb", 80), 80, 1, 500)
+        async with self._client() as client:
+            # 图文排版不放热门评论，X 也就不用等浏览器服务抓评论（最多要等 25 秒）
+            card = await self._fetch_card(client, platform, url, False, session, translate, ark,
+                                          n_comments=0)
+            if platform == "pixiv" and card.get("sensitive") \
+                    and not _bool(self.config.get("pixiv_restricted_images", True), True):
+                card = dict(card, images=[], pages_images=[])
+            if not self._show_images(session):
+                card = dict(card, images=[], photos=[], pages_images=[])
+            if not _bool(self.config.get("x_video_send", True), True):
+                card = dict(card, videos=[])
+            plan = layouts.plan(card, limit)
+            referer = card.get("referer") or card.get("url")
+            bot = str(event.get_self_id() or "0")
+            chains = []
+            for msg in plan:
+                chain = []
+                for kind, value in msg:
+                    if kind == "card":
+                        path = await self._x_card_image(client, card, session)
+                        if path:
+                            chain.append(_image(path))
+                    elif kind == "text":
+                        chain.append(Comp.Plain(value))
+                    elif kind == "image":
+                        path = await self._save_media(client, value, referer, 20)
+                        if path:
+                            chain.append(_image(path))
+                    elif kind == "video":
+                        path = await self._save_media(client, value, referer, video_mb)
+                        if path:
+                            chain.append(Comp.Video.fromFileSystem(path))
+                    elif kind == "forward":
+                        paths = [p for p in [await self._save_media(client, u, referer, 20) for u in value] if p]
+                        if paths and event.get_platform_name() == "aiocqhttp":
+                            name = card.get("platform_name") or "图片"
+                            chain.append(Comp.Nodes([Comp.Node(uin=bot, name=name, content=[_image(p)])
+                                                     for p in paths]))
+                        else:
+                            chain.extend(_image(p) for p in paths)
+                if chain:
+                    chains.append(chain)
+            return chains
 
     async def _preview(self, event, links, comments_mode=False, quiet=True, translate=False):
         self._clean_cache()
@@ -517,8 +625,12 @@ class LinkPreviewPlugin(Star):
             ark = item[2] if len(item) > 2 else None
             logger.info(f"[LinkPreview] 开始预览 {platform} {url}")
             try:
-                path = await self._make_card_image(platform, url, comments_mode, session,
-                                                   translate, ark)
+                if self._use_layout(platform, comments_mode):
+                    chains = await self._layout_chains(event, platform, url, translate, ark)
+                else:
+                    path = await self._make_card_image(platform, url, comments_mode, session,
+                                                       translate, ark)
+                    chains = [[_image(path)]] if path else []
             except Blocked as e:
                 logger.info(f"[LinkPreview] {platform} {url} {'疑似不适宜内容' if isinstance(e, RestrictedBlocked) else '命中屏蔽词'}，已拦截")
                 if not quiet or _bool(self.config.get("block_notice", True), True):
@@ -528,13 +640,14 @@ class LinkPreviewPlugin(Star):
                 logger.warning(f"[LinkPreview] {platform} {url} 预览失败：{e}")
                 yield event.plain_result(f"预览失败：{_brief(e)}")
                 continue
-            if not path:
+            if not chains:
                 continue
             self._last_link[session] = (platform, url)
-            image = Comp.Image.fromURL(path) if str(path).startswith("http") else Comp.Image.fromFileSystem(path)
-            err = await self._send_or_notice(event, [image])
-            if err:
-                yield event.plain_result(f"卡片发送失败：{err}")
+            for chain in chains:
+                err = await self._send_or_notice(event, chain)
+                if err:
+                    yield event.plain_result(f"发送失败：{err}")
+                    break
 
     # ------------------------------------------------------------------ 自动识别
 

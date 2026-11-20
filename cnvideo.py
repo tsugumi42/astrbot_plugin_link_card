@@ -131,6 +131,10 @@ async def fetch_bilibili(client, url):
         video=True,
         duration=duration(v.get("duration")),
         note=f"共 {len(pages)} P" if len(pages) > 1 else None,
+        # 分 P：[(这一 P 的名字, 时长)]；page 只在链接里明确写了 ?p= 时才有
+        pages=[(x.get("part") or "", duration(x.get("duration"))) for x in pages],
+        page=page if re.search(r"[?&]p=\d+", str(url)) else None,
+        total_duration=duration(v.get("duration")),
     )
 
 

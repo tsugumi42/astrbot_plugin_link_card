@@ -5,6 +5,30 @@
         "default": true,
         "hint": "关掉后只保留 /预览 和 /评论 指令"
     },
+    "layout_enabled": {
+        "description": "X、pixiv、视频按图文排版发",
+        "type": "bool",
+        "default": true,
+        "hint": "开：X 发卡片图 + 链接 + 原图（视频另起一条发文件）；pixiv 发标题行 + 原图；B 站、YouTube 等视频发封面 + 几行文字。关：所有平台都只发一张卡片图"
+    },
+    "image_limit": {
+        "description": "一条消息里最多直接放几张图",
+        "type": "int",
+        "default": 3,
+        "hint": "超过就把图片改成合并转发单独发"
+    },
+    "pixiv_restricted_images": {
+        "description": "pixiv 分级作品照常发图",
+        "type": "bool",
+        "default": true,
+        "hint": "关掉后分级作品只发标题行，不发图"
+    },
+    "x_video_send": {
+        "description": "X 视频下载后发文件",
+        "type": "bool",
+        "default": true,
+        "hint": "大小上限用「下载大小上限」那一项"
+    },
     "platforms": {
         "description": "识别哪些平台",
         "type": "object",
@@ -175,6 +199,13 @@
         "type": "bool",
         "default": true,
         "hint": "默认开：日文/韩文/英文的帖子在卡片里直接带译文，不用再发 /翻译。每张卡片多一次模型调用，出图会慢几秒；中文帖子不会触发。想省调用就关掉"
+    },
+    "translate_provider": {
+        "description": "翻译用的模型",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空就用当前会话的对话模型。建议选一个便宜快速的模型专门翻译"
     },
     "comment_count": {
         "description": "卡片里显示几条热门评论",
@@ -376,8 +407,8 @@
     "restricted_enabled": {
         "description": "启用分级过滤",
         "type": "bool",
-        "default": true,
-        "hint": "卡片的标题、正文、作者、标签命中分级词表就整条不发；命中的评论单独去掉。维基 /全文 不做分级检查"
+        "default": false,
+        "hint": "卡片的标题、正文、作者、标签命中分级词表就整条不发；命中的评论单独去掉。维基 /全文 不做分级检查。本分支默认关：分级作品照常发"
     },
     "restricted_block_flagged": {
         "description": "平台标记为分级内容的也整条不发",

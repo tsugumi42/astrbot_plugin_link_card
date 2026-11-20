@@ -33,7 +33,7 @@ UA = (
 )
 CST = timezone(timedelta(hours=8))
 # 维基要求 User-Agent 里带联系地址，不带会被 403
-WIKI_UA = "NekoLinkPreview/1.0 (+https://github.com/EndermanMYR/astrbot_plugin_link_preview) httpx"
+WIKI_UA = "LinkCard/1.0 (+https://github.com/tsugumi42/astrbot_plugin_link_card) httpx"
 # Instagram 修复站只给「聊天软件抓取预览」的 User-Agent 返回内容
 EMBED_BOT_UA = "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)"
 
@@ -652,6 +652,13 @@ async def fetch_og(client, platform, url):
 # X / Twitter：fxtwitter 公共接口
 # ---------------------------------------------------------------------------
 
+def _x_large(url):
+    """推特图片取大图（长边 2048）；orig 动辄几 MB，群里看不出差别。"""
+    base = re.sub(r"[?].*$", "", url)
+    m = re.match(r"^(.*)\.(jpe?g|png|webp)$", base)
+    return f"{m.group(1)}?format={m.group(2)}&name=large" if m else url
+
+
 async def _x_card(client, url, tid):
     """主数据源：fxtwitter 公开接口，能拿到配图、头像、引用推。"""
     r = await client.get(f"https://api.fxtwitter.com/status/{tid}")
@@ -662,13 +669,18 @@ async def _x_card(client, url, tid):
     a = t.get("author") or {}
     media = t.get("media") or {}
     images, is_video, dur = [], False, None
+    photos, videos = [], []
     for p in media.get("photos") or []:
         images.append(p.get("url"))
+        if p.get("url"):
+            photos.append(_x_large(p["url"]))
     for v in media.get("videos") or []:
         if v.get("thumbnail_url"):
             images.append(v["thumbnail_url"])
         is_video = True
         dur = dur or duration(v.get("duration"))
+        videos.append({"url": v.get("url"), "thumb": v.get("thumbnail_url"),
+                       "duration": duration(v.get("duration")), "gif": v.get("type") == "gif"})
     q = t.get("quote")
     quote_block = None
     if q:
@@ -685,6 +697,8 @@ async def _x_card(client, url, tid):
                stat("喜欢", t.get("likes")), stat("浏览", t.get("views"))],
         time=fmt_time(t.get("created_timestamp")), quote=quote_block,
         sensitive=bool(t.get("possibly_sensitive")),
+        # 原图（发消息时另附，不画进卡片）和视频直链
+        photos=photos, videos=videos,
     )
 
 
@@ -1021,6 +1035,22 @@ async def fetch_pixiv(client, url, comments=0):
             cmts = []
     tags = [t.get("tag") for t in ((body.get("tags") or {}).get("tags") or [])][:6]
     img = ((body.get("urls") or {}).get("regular"))
+    # 多图作品逐张取；R-18 也取，发不发由插件配置决定
+    pages_images = [img] if img else []
+    if (body.get("pageCount") or 1) > 1:
+        try:
+            r = await client.get(f"https://www.pixiv.net/ajax/illust/{pid}/pages", headers=headers)
+            rows = r.json().get("body") or [] if r.status_code == 200 else []
+            got = [(x.get("urls") or {}).get("regular") for x in rows]
+            pages_images = [u for u in got if u] or pages_images
+        except (httpx.HTTPError, ValueError):
+            pass
+    if not pages_images:
+        # 不登录时 R-18 作品的接口不给图片地址，改走 pixiv.cat 图片中转（它用自己的账号取原图）。
+        # 多图作品是 ID-页码.jpg，单图是 ID.jpg；实际格式不对它会跳转到对的地址。
+        n = max(1, int(body.get("pageCount") or 1))
+        pages_images = ([f"https://pixiv.cat/{pid}.jpg"] if n == 1
+                        else [f"https://pixiv.cat/{pid}-{i}.jpg" for i in range(1, n + 1)])
     desc = re.sub(r"<br\s*/?>", "\n", body.get("description") or "")
     desc = htmllib.unescape(re.sub(r"<[^>]+>", "", desc))
     return card("pixiv", url, title=body.get("title"), text=desc,
@@ -1030,7 +1060,8 @@ async def fetch_pixiv(client, url, comments=0):
                        stat("浏览", body.get("viewCount")), stat("张数", body.get("pageCount"))],
                 tags=tags, time=fmt_time(body.get("createDate")),
                 sensitive=r18, note="R-18 作品，不显示图片" if r18 else None, comments=cmts,
-                referer="https://www.pixiv.net/")
+                referer="https://www.pixiv.net/",
+                ai=body.get("aiType") == 2, pages_images=pages_images)
 
 
 # ---------------------------------------------------------------------------
@@ -1934,8 +1965,11 @@ async def fetch(client, platform, url, github_token=None, comments=0, steam_api_
     return await fetch_og(client, platform, url)
 
 
-# Clash / Surge 的 fake-ip 模式会把所有域名解析到这一段，属于测试网段而不是内网，放行
+# Clash / Surge 的 fake-ip 模式会把所有域名解析到这一段，属于测试网段而不是内网，放行。
+# mihomo 开了 IPv6 时还会给一个 2001:2::/48 的假地址（同样是基准测试网段），一并放行，
+# 不然 getaddrinfo 同时返回两个地址时会因为 v6 那个被整条拒绝。
 _FAKE_IP_NET = ipaddress.ip_network("198.18.0.0/15")
+_FAKE_IP6_NET = ipaddress.ip_network("2001:2::/48")
 
 
 def _blocked_ip(ip):
@@ -1946,7 +1980,7 @@ def _blocked_ip(ip):
         return True
     if addr.version == 6 and addr.ipv4_mapped:
         addr = addr.ipv4_mapped
-    if addr.version == 4 and addr in _FAKE_IP_NET:
+    if (addr.version == 4 and addr in _FAKE_IP_NET) or (addr.version == 6 and addr in _FAKE_IP6_NET):
         return False
     return not addr.is_global or addr.is_multicast
 

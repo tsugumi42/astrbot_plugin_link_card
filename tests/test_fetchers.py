@@ -611,7 +611,7 @@ class TestPrivateGuard(unittest.TestCase):
         for ip in ("127.0.0.1", "10.1.2.3", "172.17.0.1", "192.168.1.1", "169.254.169.254",
                    "100.64.0.1", "0.0.0.0", "::1", "fe80::1%en0", "::ffff:127.0.0.1", "224.0.0.1", "bad"):
             self.assertTrue(fetchers._blocked_ip(ip), ip)
-        for ip in ("93.184.215.14", "1.1.1.1", "2606:4700::1111", "198.18.0.7"):
+        for ip in ("93.184.215.14", "1.1.1.1", "2606:4700::1111", "198.18.0.7", "2001:2::2dc"):
             self.assertFalse(fetchers._blocked_ip(ip), ip)
 
     def test_public_ok(self):

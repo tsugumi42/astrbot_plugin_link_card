@@ -318,6 +318,21 @@ def image_problem(path):
             else f"文转图服务返回了空文件（{len(data)} 字节）")
 
 
+def image_suffix(path):
+    """按文件头判断图片格式，返回扩展名；认不出按 .jpg。"""
+    try:
+        head = Path(path).read_bytes()[:12]
+    except OSError:
+        return ".jpg"
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if head[:4] == b"GIF8":
+        return ".gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp"
+    return ".jpg"
+
+
 def crop_image(path, pad=8, threshold=10):
     """裁掉四周与背景色相同的留白。
 

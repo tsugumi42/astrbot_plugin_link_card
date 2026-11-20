@@ -29,6 +29,27 @@
         "default": true,
         "hint": "大小上限用「下载大小上限」那一项"
     },
+    "stage_emoji": {
+        "description": "处理时在原消息上贴表情",
+        "type": "bool",
+        "default": true,
+        "hint": "只在 QQ 群：开始解析贴一个，发完换成完成，失败换成失败；表情编号见下面三项"
+    },
+    "start_emoji": {
+        "description": "开始解析的表情编号",
+        "type": "string",
+        "default": "289"
+    },
+    "done_emoji": {
+        "description": "发送完成的表情编号",
+        "type": "string",
+        "default": "124"
+    },
+    "fail_emoji": {
+        "description": "失败的表情编号",
+        "type": "string",
+        "default": "9"
+    },
     "x_card_fonts": {
         "description": "推特卡片字体",
         "type": "string",

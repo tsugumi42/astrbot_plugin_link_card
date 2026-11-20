@@ -499,9 +499,22 @@ class LinkPreviewPlugin(Star):
         timeout = _int(self.config.get("fetch_timeout", 12), 12, 3, 60)
         return fetchers.make_client(self.config.get("proxy") or None, timeout)
 
+    async def _apply_translation(self, card, translate=False, session=None):
+        """需要翻译就把译文放进 card["translation"]。自动翻译失败只记日志；用户点名要翻译（translate=True）时失败要报出来。"""
+        auto = _bool(self.config.get("translate_auto", True), True)
+        if not (translate or (auto and fetchers.needs_translation(card.get("text") or card.get("title")))):
+            return
+        try:
+            card["translation"] = await self._translate_card(card, session)
+            logger.info("[LinkPreview] 已翻译卡片正文")
+        except Exception as e:  # noqa: BLE001 - 翻译失败不该影响出图
+            logger.warning(f"[LinkPreview] 翻译失败：{e}")
+            if translate:
+                raise RuntimeError(f"翻译失败：{e}") from e
+
     async def _fetch_card(self, client, platform, url, comments_mode=False, session=None,
-                          translate=False, ark=None, n_comments=None):
-        """抓取 + 屏蔽 + 翻译，返回卡片字典。"""
+                          translate=False, ark=None, n_comments=None, defer_translate=False):
+        """抓取 + 屏蔽 + 翻译，返回卡片字典。defer_translate=True 时不翻译，调用方自己调 _apply_translation。"""
         if n_comments is None:
             n_comments = 10 if comments_mode else _int(self.config.get("comment_count", 3), 3, 0, 10)
         x_task = None
@@ -517,15 +530,8 @@ class LinkPreviewPlugin(Star):
         if x_task:
             card["comments"] = await x_task
         card = self._filter_card(card)
-        auto = _bool(self.config.get("translate_auto", True), True)
-        if translate or (auto and fetchers.needs_translation(card.get("text") or card.get("title"))):
-            try:
-                card["translation"] = await self._translate_card(card, session)
-                logger.info("[LinkPreview] 已翻译卡片正文")
-            except Exception as e:  # noqa: BLE001 - 翻译失败不该影响出图
-                logger.warning(f"[LinkPreview] 翻译失败：{e}")
-                if translate:
-                    raise RuntimeError(f"翻译失败：{e}") from e
+        if not defer_translate:
+            await self._apply_translation(card, translate, session)
         if comments_mode and not card.get("comments"):
             card["no_comments_reason"] = (
                 "这个平台拿不到评论" if platform not in fetchers.COMMENT_PLATFORMS else "暂时没有评论"
@@ -593,14 +599,28 @@ class LinkPreviewPlugin(Star):
         return str(out)
 
     async def _layout_chains(self, event, platform, url, translate=False, ark=None):
-        """抓取后按平台排版，返回要依次发出的消息链列表。"""
+        """抓取后按平台排版，返回要依次发出的消息链列表。
+
+        抓到卡片以后，翻译（只有 X 卡片图要用）和原图、视频的下载同时开始；卡片图等翻译完再画。
+        2026-11-20 一条推特从收到到发出将近 30 秒：翻译 11 秒，之后出卡片、下原图又一个接一个排了十几秒。
+        """
         session = event.unified_msg_origin
         limit = _int(self.config.get("image_limit", 3), 3, 1, 9)
         video_mb = _int(self.config.get("download_max_mb", 80), 80, 1, 500)
+        t0 = time.monotonic()
+        spans = {}
+
+        async def timed(name, coro):
+            t = time.monotonic()
+            try:
+                return await coro
+            finally:
+                spans[name] = time.monotonic() - t
+
         async with self._client() as client:
             # 图文排版不放热门评论，X 也就不用等浏览器服务抓评论（最多要等 25 秒）
-            card = await self._fetch_card(client, platform, url, False, session, translate, ark,
-                                          n_comments=0)
+            card = await timed("抓取", self._fetch_card(client, platform, url, False, session, translate, ark,
+                                                       n_comments=0, defer_translate=True))
             if platform == "pixiv" and card.get("sensitive") \
                     and not _bool(self.config.get("pixiv_restricted_images", True), True):
                 card = dict(card, images=[], pages_images=[])
@@ -611,26 +631,48 @@ class LinkPreviewPlugin(Star):
             plan = layouts.plan(card, limit)
             referer = card.get("referer") or card.get("url")
             bot = str(event.get_self_id() or "0")
+
+            # 先把要下的东西都排上（同一个地址只下一次）
+            downloads = {}
+            for msg in plan:
+                for kind, value in msg:
+                    urls = value if kind == "forward" else [value] if kind in ("image", "video") else []
+                    for u in urls:
+                        if u not in downloads:
+                            mb = video_mb if kind == "video" else 20
+                            downloads[u] = asyncio.ensure_future(self._save_media(client, u, referer, mb))
+            media = asyncio.ensure_future(timed("下载", asyncio.gather(*downloads.values())))
+
+            card_path = None
+            try:
+                if any(kind == "card" for msg in plan for kind, _ in msg):
+                    await timed("翻译", self._apply_translation(card, translate, session))
+                    card_path = await timed("出卡片", self._x_card_image(client, card, session))
+                await media
+            except BaseException:
+                media.cancel()
+                for t in downloads.values():
+                    t.cancel()
+                raise
+            saved = {u: t.result() for u, t in downloads.items()}
+
             chains = []
             for msg in plan:
                 chain = []
                 for kind, value in msg:
                     if kind == "card":
-                        path = await self._x_card_image(client, card, session)
-                        if path:
-                            chain.append(_image(path))
+                        if card_path:
+                            chain.append(_image(card_path))
                     elif kind == "text":
                         chain.append(Comp.Plain(value))
                     elif kind == "image":
-                        path = await self._save_media(client, value, referer, 20)
-                        if path:
-                            chain.append(_image(path))
+                        if saved.get(value):
+                            chain.append(_image(saved[value]))
                     elif kind == "video":
-                        path = await self._save_media(client, value, referer, video_mb)
-                        if path:
-                            chain.append(Comp.Video.fromFileSystem(path))
+                        if saved.get(value):
+                            chain.append(Comp.Video.fromFileSystem(saved[value]))
                     elif kind == "forward":
-                        paths = [p for p in [await self._save_media(client, u, referer, 20) for u in value] if p]
+                        paths = [saved[u] for u in value if saved.get(u)]
                         if paths and event.get_platform_name() == "aiocqhttp":
                             name = card.get("platform_name") or "图片"
                             chain.append(Comp.Nodes([Comp.Node(uin=bot, name=name, content=[_image(p)])
@@ -639,9 +681,34 @@ class LinkPreviewPlugin(Star):
                             chain.extend(_image(p) for p in paths)
                 if chain:
                     chains.append(chain)
-            return chains
+        detail = "，".join(f"{k} {v:.1f}s" for k, v in spans.items())
+        logger.info(f"[LinkPreview] {platform} 排版完成，共 {time.monotonic() - t0:.1f}s（{detail}；"
+                    f"下载 {len(downloads)} 个文件，和翻译、出卡片同时进行）")
+        return chains
 
-    async def _preview(self, event, links, comments_mode=False, quiet=True, translate=False):
+    async def _react(self, event, emoji_id, unset=False):
+        """在触发的那条群消息上贴（unset=True 时取消）一个表情。只在 QQ 群（OneBot）里做，失败只记调试日志。"""
+        if not emoji_id or event.get_platform_name() != "aiocqhttp" or not event.get_group_id():
+            return
+        try:
+            params = {"message_id": int(event.message_obj.message_id), "emoji_id": str(emoji_id)}
+            if unset:
+                params["set"] = False
+            await event.bot.call_action("set_msg_emoji_like", **params)
+        except Exception as e:  # noqa: BLE001 - 表情只是提示，贴不上不影响预览
+            logger.debug(f"[LinkPreview] 贴表情失败：{e}")
+
+    def _stage_emojis(self):
+        if not _bool(self.config.get("stage_emoji", True), True):
+            return None, None, None
+        return tuple(str(self.config.get(k, d) or "").strip() for k, d in
+                     (("start_emoji", "289"), ("done_emoji", "124"), ("fail_emoji", "9")))
+
+    async def _preview(self, event, links, comments_mode=False, quiet=True, translate=False, outcome=None):
+        """outcome 是个字典时记下结果：sent（发出去几条）、failed（失败几条）。"""
+        outcome = outcome if outcome is not None else {}
+        outcome.setdefault("sent", 0)
+        outcome.setdefault("failed", 0)
         self._clean_cache()
         session = event.unified_msg_origin
         for item in links:
@@ -662,6 +729,7 @@ class LinkPreviewPlugin(Star):
                 continue
             except Exception as e:
                 logger.warning(f"[LinkPreview] {platform} {url} 预览失败：{e}")
+                outcome["failed"] += 1
                 yield event.plain_result(f"预览失败：{_brief(e)}")
                 continue
             if not chains:
@@ -670,8 +738,11 @@ class LinkPreviewPlugin(Star):
             for chain in chains:
                 err = await self._send_or_notice(event, chain)
                 if err:
+                    outcome["failed"] += 1
                     yield event.plain_result(f"发送失败：{err}")
                     break
+            else:
+                outcome["sent"] += 1
 
     # ------------------------------------------------------------------ 自动识别
 
@@ -728,8 +799,18 @@ class LinkPreviewPlugin(Star):
                     logger.info(f"[LinkPreview] 识别到网址但都不出卡（平台关闭或被过滤）：{urls[:2]}")
             return
         logger.info(f"[LinkPreview] 自动预览 {len(links)} 条：" + " | ".join(str(x[1]) for x in links))
-        async for res in self._preview(event, links):
-            yield res
+        start, done, fail = self._stage_emojis()
+        await self._react(event, start)
+        outcome = {}
+        try:
+            async for res in self._preview(event, links, outcome=outcome):
+                yield res
+        finally:
+            await self._react(event, start, unset=True)
+            if outcome.get("failed"):
+                await self._react(event, fail)
+            elif outcome.get("sent"):
+                await self._react(event, done)
 
     # ------------------------------------------------------------------ 发送前检查
 

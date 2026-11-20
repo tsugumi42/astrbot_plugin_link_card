@@ -15,9 +15,6 @@
 """
 
 import asyncio
-import base64
-import io
-import logging
 import math
 import os
 import re
@@ -38,7 +35,6 @@ import render
 
 BEIJING = timezone(timedelta(hours=8))  # 中国没有夏令时，固定东八区，不看本机时区
 TEMPLATE = Path(__file__).parent / "templates" / "x_card.html"
-FONT_DIR = Path(__file__).parent / "fonts"
 
 CARD_WIDTH = 600   # 卡片宽（CSS 像素，照 X 网页的推文栏宽）
 PAGE_PAD = 8       # 卡片四周留的底色，裁边时按它和卡片边框的色差找边
@@ -567,176 +563,30 @@ def _quote_author(q):
     return name.strip(), _handle(handle)
 
 # ---------------------------------------------------------------------------
-# 字体：按卡片用到的字子集化后内嵌。家族名改成 LinkCardRounded / LinkCardMono（OFL 保留字体名不能用在改过的字体上），
-# 字体内部的 name 表也一起改掉。
+# 字体：直接用系统里装的字体。卡片在本机 Edge 里截图，系统和当前用户装的字体它都能用，
+# 按配置的顺序找，前面的缺字再往后找，最后交给浏览器自己的兜底字体。
 
-# 字体文件很大（文渊圆体 46 MB），不进仓库：按顺序在这些目录里找，插件启动时会把数据目录加进来，
-# 文渊圆体缺了就从官方发布页下到数据目录（ensure_fonts）。Maple 只在有人放进来时才用，否则缺字交给系统字体。
-FONT_DIRS = [FONT_DIR]
-ROUNDED_NAME = "WenYuanRoundedSCVF.ttf"
-ROUNDED_URL = "https://github.com/takushun-wu/WenYuanFonts/releases/download/v1.110/WenYuanRoundedSCVF.ttf"
-MONO_NAMES = (("MapleMono-NF-CN-Regular.ttf", 400), ("MapleMono-NF-CN-Bold.ttf", 700))
+DEFAULT_FONTS = ("Resource Han Rounded CN", "Maple Mono NF CN")
+FALLBACK_FONTS = ('"Segoe UI"', '"Microsoft YaHei UI"', '"Microsoft YaHei"', '"PingFang SC"',
+                  '"Noto Sans CJK SC"', '"Malgun Gothic"', '"Apple SD Gothic Neo"', "sans-serif")
 
 
-def font_path(name):
-    """在 FONT_DIRS 里找字体，找不到返回 None。"""
-    for d in FONT_DIRS:
-        p = Path(d) / name
-        if p.exists():
-            return p
-    return None
+def font_stack(names=None):
+    """配置的字体名（逗号分隔的字符串或列表）拼成 CSS font-family。
 
+    名字里的引号、分号、花括号、尖括号去掉：这串字直接写进样式表，不能让它改坏样式或跳出 <style>。
+    """
+    if names is None or (isinstance(names, str) and not names.strip()):
+        names = DEFAULT_FONTS
+    if isinstance(names, str):
+        names = names.replace("，", ",").split(",")
+    out = []
+    for n in names:
+        n = " ".join(re.sub(r"[\"'\\;{}<>]", "", str(n)).split())
+        if n and f'"{n}"' not in out:
+            out.append(f'"{n}"')
+    return ", ".join(out + [f for f in FALLBACK_FONTS if f not in out])
 
-async def ensure_fonts(client, data_dir):
-    """文渊圆体不在就下到 data_dir/fonts；下不来只记日志，卡片照样用系统字体出。"""
-    target = Path(data_dir) / "fonts"
-    if str(target) not in map(str, FONT_DIRS):
-        FONT_DIRS.append(target)
-    if font_path(ROUNDED_NAME):
-        return
-    target.mkdir(parents=True, exist_ok=True)
-    tmp = target / (ROUNDED_NAME + ".part")
-    try:
-        async with client.stream("GET", ROUNDED_URL) as r:
-            r.raise_for_status()
-            with open(tmp, "wb") as f:
-                async for chunk in r.aiter_bytes(1 << 16):
-                    f.write(chunk)
-        tmp.replace(target / ROUNDED_NAME)
-        logger.info(f"[LinkPreview] 已下载推特卡片字体到 {target}")
-    except Exception as e:  # noqa: BLE001 - 下不来就用系统字体
-        logger.warning(f"[LinkPreview] 下载推特卡片字体失败，先用系统字体：{e}")
-        tmp.unlink(missing_ok=True)
-ROUNDED_FAMILY = "LinkCardRounded"
-MONO_FAMILY = "LinkCardMono"
-# 模板里写死、不在数据里的字
-STATIC_TEXT = "查看完整内容见原文……图片未加载GIF+%·0123456789:上午下午年月日共票已结束截止"
-
-_cmaps = {}
-_subsets = {}
-
-
-def _cmap(path):
-    key = str(path)
-    if key not in _cmaps:
-        from fontTools.ttLib import TTFont
-        with TTFont(str(path), lazy=True) as f:
-            _cmaps[key] = frozenset(f.getBestCmap() or {})
-    return _cmaps[key]
-
-
-# 版权（0）、商标（7）、许可证说明和链接（13、14）原样保留（OFL 要求留着版权声明），其余记录里的原名都换掉
-_NAME_KEEP = {0, 7, 13, 14}
-
-
-def _rename(font, family):
-    """改 name 表：家族名、全名、PostScript 名，以及可变字体各个实例的名字（fvar 里的 PS 名）都换成自己的。"""
-    name = font["name"]
-    ps = family.replace(" ", "")
-    olds = set()
-    for nid in (1, 4, 6, 16, 21, 25):
-        for rec in name.names:
-            if rec.nameID == nid:
-                s = rec.toUnicode().strip()
-                if s:
-                    olds.add(s)
-                    olds.add(s.replace(" ", ""))
-    for nid in (1, 3, 4, 6, 16, 17, 21, 22, 25):
-        name.removeNames(nameID=nid)
-    olds = sorted(olds, key=len, reverse=True)
-    for rec in name.names:
-        if rec.nameID in _NAME_KEEP:
-            continue
-        s = rec.toUnicode()
-        t = s
-        for o in olds:
-            t = t.replace(o, ps if " " not in o else family)
-        if t != s:
-            rec.string = t
-    for nid, val in ((1, family), (4, family), (6, ps), (3, ps + "-subset")):
-        name.setName(val, nid, 3, 1, 0x409)
-        name.setName(val, nid, 1, 0, 0)
-
-
-def subset_font(path, chars, family):
-    """按 chars 子集化 path，改名、转 woff2，返回 base64；失败返回空串（调用方写日志、退回系统字体）。"""
-    key = (str(path), family, chars)
-    if key in _subsets:
-        return _subsets[key]
-    from fontTools import subset
-    from fontTools.ttLib import TTFont
-
-    logging.getLogger("fontTools").setLevel(logging.WARNING)  # fontTools 的 INFO 会刷满 AstrBot 日志
-    opts = subset.Options()
-    opts.flavor = "woff2"
-    opts.layout_features = ["*"]   # 要留 chws（相邻全角标点挤压）
-    opts.name_IDs = ["*"]
-    opts.hinting = False
-    opts.notdef_outline = True
-    font = TTFont(str(path))
-    try:
-        sub = subset.Subsetter(options=opts)
-        sub.populate(text=chars)
-        sub.subset(font)
-        _rename(font, family)
-        font.flavor = "woff2"
-        buf = io.BytesIO()
-        font.save(buf)
-    finally:
-        font.close()
-    b64 = base64.b64encode(buf.getvalue()).decode()
-    if len(_subsets) > 32:
-        _subsets.clear()
-    _subsets[key] = b64
-    return b64
-
-
-def font_css(chars):
-    """文渊圆体（可变字体，字重 100～900）+ 文渊圆体缺的字用 Maple Mono NF CN 兜底，再缺交给系统字体。"""
-    chars = "".join(sorted(set(chars) | set(STATIC_TEXT)))
-    faces = []
-    missing = chars
-    rounded = font_path(ROUNDED_NAME)
-    if rounded:
-        try:
-            b64 = subset_font(rounded, chars, ROUNDED_FAMILY)
-            faces.append(f'@font-face{{font-family:"{ROUNDED_FAMILY}";font-style:normal;font-weight:100 900;'
-                         f'font-display:block;src:url(data:font/woff2;base64,{b64}) format("woff2")}}')
-            have = _cmap(rounded)
-            missing = "".join(c for c in chars if ord(c) not in have and not c.isspace()
-                              and unicodedata.category(c) not in ("Cc", "Cf"))
-        except Exception as e:  # noqa: BLE001 - 字体坏了也要能出图，只是退回系统字体
-            logger.warning(f"[LinkPreview] 推特卡片字体子集化失败，退回系统字体：{e}")
-    else:
-        logger.warning(f"[LinkPreview] 找不到推特卡片字体 {ROUNDED_NAME}，退回系统字体")
-    if missing:
-        for name, weight in MONO_NAMES:
-            path = font_path(name)
-            if not path:
-                continue
-            try:
-                if not any(ord(c) in _cmap(path) for c in missing):
-                    continue
-                b64 = subset_font(path, missing, MONO_FAMILY)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"[LinkPreview] 兜底字体子集化失败：{e}")
-                continue
-            faces.append(f'@font-face{{font-family:"{MONO_FAMILY}";font-style:normal;font-weight:{weight};'
-                         f'font-display:block;src:url(data:font/woff2;base64,{b64}) format("woff2")}}')
-    return "".join(faces)
-
-
-def _collect_text(obj, out):
-    if isinstance(obj, str):
-        if not obj.startswith("data:"):
-            out.append(obj)
-    elif isinstance(obj, dict):
-        for k, v in obj.items():
-            if k not in ("src", "avatar", "aspect", "theme", "k", "icon", "badge"):
-                _collect_text(v, out)
-    elif isinstance(obj, (list, tuple)):
-        for v in obj:
-            _collect_text(v, out)
 
 # ---------------------------------------------------------------------------
 # 模板数据
@@ -763,11 +613,11 @@ def _estimate_height(d):
     return int(h * 1.15) + 120
 
 
-async def x_card_data(client, card, theme, *, now=None, embed_fonts=True):
+async def x_card_data(client, card, theme, *, now=None, fonts=None):
     """把 fetchers 的推特卡片字典整理成 x_card.html 的模板变量。
 
     client 是 httpx.AsyncClient（下载头像和缩略图）；theme 是 light / dark，别的值（auto、None）按北京时间。
-    拿不到的字段模板里整块不画。embed_fonts=False 时不做字体子集（测试用，省掉一两秒）。
+    拿不到的字段模板里整块不画。fonts 是配置里填的系统字体名（见 font_stack）。
     """
     now = now or datetime.now(timezone.utc)
     c = card or {}
@@ -822,12 +672,7 @@ async def x_card_data(client, card, theme, *, now=None, embed_fonts=True):
         "actions": actions(c),
     }
     d["height"] = min(MAX_WINDOW_HEIGHT, _estimate_height(d))
-    if embed_fonts:
-        texts = []
-        _collect_text({k: v for k, v in d.items() if k != "body_text"}, texts)
-        d["font_css"] = await asyncio.to_thread(font_css, "".join(texts))
-    else:
-        d["font_css"] = ""
+    d["font_family"] = font_stack(fonts)
     return d
 
 
@@ -1100,7 +945,7 @@ async def render_local(html, cache_dir, *, height=1600, scale=2, timeout=30.0, b
                 pass
 
 
-async def render_card(client, card, cache_dir, theme=None):
+async def render_card(client, card, cache_dir, theme=None, fonts=None):
     """插件用的入口：整理数据、套模板、本机出图，返回 PNG 路径。失败抛异常，调用方退回通用卡片。"""
-    data = await x_card_data(client, card, theme or theme_now())
+    data = await x_card_data(client, card, theme or theme_now(), fonts=fonts)
     return await render_local(build_x_html(data), Path(cache_dir) / "xcard", height=data.get("height", 1600))

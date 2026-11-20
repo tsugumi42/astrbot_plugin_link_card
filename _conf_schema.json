@@ -29,6 +29,12 @@
         "default": true,
         "hint": "大小上限用「下载大小上限」那一项"
     },
+    "x_card_fonts": {
+        "description": "推特卡片字体",
+        "type": "string",
+        "default": "Resource Han Rounded CN, Maple Mono NF CN",
+        "hint": "填系统里装好的字体名，逗号隔开，前面的缺字再用后面的；留空用默认。名字可以在 Windows 设置的「字体」页看"
+    },
     "platforms": {
         "description": "识别哪些平台",
         "type": "object",

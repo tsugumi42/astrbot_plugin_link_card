@@ -70,7 +70,7 @@ def card(**kw):
 
 
 def build(c, theme="light", **kw):
-    data = asyncio.run(xcard.x_card_data(FakeClient(), c, theme, now=NOW, embed_fonts=False, **kw))
+    data = asyncio.run(xcard.x_card_data(FakeClient(), c, theme, now=NOW, **kw))
     return data, xcard.build_x_html(data)
 
 
@@ -209,7 +209,7 @@ class TestCardData(unittest.TestCase):
 
     def test_photos_not_drawn(self):
         client = FakeClient()
-        data = asyncio.run(xcard.x_card_data(client, card(), "light", now=NOW, embed_fonts=False))
+        data = asyncio.run(xcard.x_card_data(client, card(), "light", now=NOW))
         self.assertIsNone(data["media"])
         self.assertFalse(any("PHOTO" in u for u in client.urls))  # 照片另附，连下载都不下
 
@@ -282,7 +282,7 @@ class TestCardData(unittest.TestCase):
              "verification": {"verified": True, "type": "government"}, "timestamp": "2026-11-15 09:00",
              "text": "被引正文", "images": [{"url": "https://pbs.twimg.com/media/Q.jpg?name=orig", "width": 100, "height": 300}]}
         client = FakeClient()
-        data = asyncio.run(xcard.x_card_data(client, card(quote=q), "light", now=NOW, embed_fonts=False))
+        data = asyncio.run(xcard.x_card_data(client, card(quote=q), "light", now=NOW))
         html = xcard.build_x_html(data)
         qd = data["quote"]
         self.assertEqual((qd["name"], qd["handle"], qd["badge"], qd["date"]), ("被引者", "@quoted", "gray", "11月15日"))
@@ -335,40 +335,27 @@ class TestEscape(unittest.TestCase):
         self.assertIn("&lt;script&gt;", html)
 
 
-@unittest.skipUnless(xcard.font_path(xcard.ROUNDED_NAME), "fonts/ 里没有文渊圆体")
 class TestFonts(unittest.TestCase):
-    def test_subset_renamed(self):
-        from fontTools.ttLib import TTFont
-        import base64
+    def test_default_stack(self):
+        self.assertTrue(xcard.font_stack().startswith('"Resource Han Rounded CN", "Maple Mono NF CN", "Segoe UI"'))
+        self.assertEqual(xcard.font_stack(""), xcard.font_stack())
 
-        css = xcard.font_css("推特卡片한")   # 한 文渊圆体和 Maple 都没有，交给系统字体
-        self.assertIn('font-family:"LinkCardRounded"', css)
-        self.assertIn("font-weight:100 900", css)
-        self.assertNotIn("LinkCardMono", css)   # 兜底字体也没有这个字，就不内嵌兜底字体
-        self.assertNotIn("WenYuan", css)
-        b64 = css.split("base64,", 1)[1].split(")", 1)[0]
-        font = TTFont(io.BytesIO(base64.b64decode(b64)))
-        # OFL 保留字体名不能用作改过的字体的名字；版权声明、许可证说明（0、7、13、14）照原样保留
-        names = " ".join(str(n) for n in font["name"].names if n.nameID not in (0, 7, 13, 14))
-        self.assertNotIn("WenYuan", names)
-        self.assertNotIn("文渊", names)
-        self.assertNotIn("文源", names)
-        self.assertIn("WenYuan", str(font["name"].getName(0, 3, 1, 0x409)))
-        self.assertIn("chws", {r.FeatureTag for r in font["GPOS"].table.FeatureList.FeatureRecord})
+    def test_configured_names_first(self):
+        stack = xcard.font_stack("文渊圆体， Segoe UI ,,")
+        self.assertTrue(stack.startswith('"文渊圆体", "Segoe UI", "Microsoft YaHei UI"'))
+        self.assertEqual(stack.count('"Segoe UI"'), 1)
+        self.assertTrue(stack.endswith("sans-serif"))
 
-    @unittest.skipUnless(all(xcard.font_path(n) for n, _ in xcard.MONO_NAMES), "fonts/ 里没有 Maple Mono")
-    def test_fallback_font_only_for_missing(self):
-        from fontTools.ttLib import TTFont
-        import base64
+    def test_names_cannot_break_css(self):
+        stack = xcard.font_stack('A"; } body { color: red } </style><script>x')
+        for bad in '{};<>':
+            self.assertNotIn(bad, stack)
+        self.assertEqual(stack.count('"'), 2 * (len(xcard.FALLBACK_FONTS) - 1 + 1))
 
-        css = xcard.font_css("卡")   # U+E0B0 是 Nerd Font 的符号，文渊圆体没有、Maple NF 有
-        self.assertEqual(css.count('font-family:"LinkCardMono"'), 2)  # 常规、粗体
-        b64 = css.split('font-family:"LinkCardMono"', 1)[1].split("base64,", 1)[1].split(")", 1)[0]
-        font = TTFont(io.BytesIO(base64.b64decode(b64)))
-        self.assertIn(0xE0B0, font.getBestCmap())
-        self.assertNotIn(ord("卡"), font.getBestCmap())   # 兜底字体只装文渊圆体缺的字
-        names = " ".join(str(n) for n in font["name"].names if n.nameID not in (0, 7, 13, 14))
-        self.assertNotIn("Maple", names)
+    def test_template_uses_stack(self):
+        data, _ = build(card(text="hi"))
+        html = xcard.build_x_html(dict(data, font_family=xcard.font_stack("测试字体")))
+        self.assertIn('font-family: "测试字体", "Segoe UI"', html)
 
 
 class TestLocalRender(unittest.TestCase):

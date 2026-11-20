@@ -131,8 +131,6 @@ class LinkPreviewPlugin(Star):
 
     async def initialize(self):
         """插件被激活时调用；这里才保证有事件循环，用来写入手填的 Cookie。"""
-        # 推特卡片字体不进仓库，缺了就在后台下到数据目录；没下完之前卡片用系统字体
-        self._font_task = asyncio.ensure_future(self._prepare_fonts())
         if _cookie_pair(self.config.get("x_cookie", "")):
             await self._push_cookie()
         # 填了 Cookie 却没配服务地址，评论永远出不来，给一句明确的提示（卡片本身不受影响）
@@ -142,19 +140,6 @@ class LinkPreviewPlugin(Star):
                 "[LinkPreview] 填了 x_cookie 但没配 x_browser_url / x_browser_token，"
                 "X 热门评论不会显示；卡片正文和配图不受影响。部署方法见 README 的「X 评论」一节"
             )
-
-    async def _prepare_fonts(self):
-        try:
-            from . import xcard
-            async with fetchers.make_client(self.config.get("proxy") or None, 600) as client:
-                await xcard.ensure_fonts(client, self.data_dir)
-        except Exception as e:  # noqa: BLE001 - 后台任务自己接住错误
-            logger.warning(f"[LinkPreview] 准备推特卡片字体失败：{e}")
-
-    async def terminate(self):
-        task = getattr(self, "_font_task", None)
-        if task and not task.done():
-            task.cancel()
 
     def _words_path(self, key, name, legacy):
         """词表路径：配置留空就用插件数据目录下的文件。
@@ -555,7 +540,8 @@ class LinkPreviewPlugin(Star):
         """X 卡片：本机浏览器出图（清晰、不经过别人的服务），不行再退回通用卡片。"""
         try:
             from . import xcard
-            return await xcard.render_card(client, card, self.cache_dir)
+            return await xcard.render_card(client, card, self.cache_dir,
+                                           fonts=self.config.get("x_card_fonts") or None)
         except Exception as e:  # noqa: BLE001 - 退回通用卡片
             logger.warning(f"[LinkPreview] X 卡片本机出图失败，改用通用卡片：{e}")
             return await self._card_image(client, dict(card, images=[]), False, session)
